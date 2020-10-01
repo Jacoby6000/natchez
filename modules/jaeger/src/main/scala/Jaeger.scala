@@ -18,6 +18,38 @@ import java.net.URI
 
 object Jaeger {
 
+  def unsafeEntryPoint[F[_]: Sync](
+    tracer: NativeJaegerTracer, 
+    uriPrefix: Option[URI] = None
+  ): EntryPoint[F] =
+    new EntryPoint[F] {
+      def continue(name: String, kernel: Kernel): Resource[F,Span[F]] =
+        Resource.make(
+          Sync[F].delay {
+            val p = tracer.extract(
+              Format.Builtin.HTTP_HEADERS,
+              new TextMapAdapter(kernel.toHeaders.asJava)
+            )
+            tracer.buildSpan(name).asChildOf(p).start()
+          }
+        )(s => Sync[F].delay(s.finish)).map(JaegerSpan(tracer, _, uriPrefix))
+
+      def root(name: String): Resource[F,Span[F]] =
+        Resource.make(
+          Sync[F].delay(tracer.buildSpan(name).start()))(
+          s => Sync[F].delay(s.finish)
+        ).map(JaegerSpan(tracer, _, uriPrefix))
+
+      def continueOrElseRoot(name: String, kernel: Kernel): Resource[F,Span[F]] =
+        continue(name, kernel) flatMap {
+          case null => root(name) // hurr, means headers are incomplete or invalid
+          case a    => a.pure[Resource[F, ?]]
+        } recoverWith {
+          case _: UnsupportedFormatException => root(name)
+        }
+
+      }
+
   def entryPoint[F[_]: Sync](
     system: String,
     uriPrefix: Option[URI] = None,
@@ -25,38 +57,8 @@ object Jaeger {
     configure: Configuration => F[NativeJaegerTracer]
   ): Resource[F, EntryPoint[F]] =
     Resource.make(
-      Sync[F].delay(
-        new Configuration(system)).flatMap(configure))(
-        c => Sync[F].delay(c.close())
-      ).map { t =>
-        new EntryPoint[F] {
-
-          def continue(name: String, kernel: Kernel): Resource[F,Span[F]] =
-            Resource.make(
-              Sync[F].delay {
-                val p = t.extract(
-                  Format.Builtin.HTTP_HEADERS,
-                  new TextMapAdapter(kernel.toHeaders.asJava)
-                )
-                t.buildSpan(name).asChildOf(p).start()
-              }
-            )(s => Sync[F].delay(s.finish)).map(JaegerSpan(t, _, uriPrefix))
-
-          def root(name: String): Resource[F,Span[F]] =
-            Resource.make(
-              Sync[F].delay(t.buildSpan(name).start()))(
-              s => Sync[F].delay(s.finish)
-            ).map(JaegerSpan(t, _, uriPrefix))
-
-          def continueOrElseRoot(name: String, kernel: Kernel): Resource[F,Span[F]] =
-            continue(name, kernel) flatMap {
-              case null => root(name) // hurr, means headers are incomplete or invalid
-              case a    => a.pure[Resource[F, ?]]
-            } recoverWith {
-              case _: UnsupportedFormatException => root(name)
-            }
-
-        }
-      }
+      Sync[F].delay(new Configuration(system)).flatMap(configure))(
+      c => Sync[F].delay(c.close())
+    ).map(unsafeEntryPoint(_, uriPrefix))
 
 }
