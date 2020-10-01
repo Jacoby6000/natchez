@@ -15,6 +15,20 @@ import scala.jdk.CollectionConverters._
 
 object Honeycomb {
 
+  def unsafeEntryPoint[F[_]: Sync](client: HoneyClient): EntryPoint[F] =
+    new EntryPoint[F] {
+
+        def continue(name: String, kernel: Kernel): Resource[F, Span[F]] =
+          Resource.makeCase(HoneycombSpan.fromKernel(client, name, kernel))(HoneycombSpan.finish).widen
+
+        def root(name: String): Resource[F, Span[F]] =
+          Resource.makeCase(HoneycombSpan.root(client, name))(HoneycombSpan.finish).widen
+
+        def continueOrElseRoot(name: String, kernel: Kernel): Resource[F,Span[F]] =
+          Resource.makeCase(HoneycombSpan.fromKernelOrElseRoot(client, name, kernel))(HoneycombSpan.finish).widen
+
+      }
+
   def entryPoint[F[_]: Sync](
     service:          String,
     responseObserver: ResponseObserver = DefaultResponseObserver
@@ -26,20 +40,8 @@ object Honeycomb {
         c <- Sync[F].delay(LibHoney.create(o))
         _ <- Sync[F].delay(c.addResponseObserver(responseObserver))
       } yield c
-    } (c => Sync[F].delay(c.close)) map { c =>
-      new EntryPoint[F] {
-
-        def continue(name: String, kernel: Kernel): Resource[F, Span[F]] =
-          Resource.makeCase(HoneycombSpan.fromKernel(c, name, kernel))(HoneycombSpan.finish).widen
-
-        def root(name: String): Resource[F, Span[F]] =
-          Resource.makeCase(HoneycombSpan.root(c, name))(HoneycombSpan.finish).widen
-
-        def continueOrElseRoot(name: String, kernel: Kernel): Resource[F,Span[F]] =
-          Resource.makeCase(HoneycombSpan.fromKernelOrElseRoot(c, name, kernel))(HoneycombSpan.finish).widen
-
-      }
-    }
+    } (c => Sync[F].delay(c.close))
+    .map(unsafeEntryPoint(_))
 
   // a minimal side-effecting observer
   val DefaultResponseObserver: ResponseObserver =
